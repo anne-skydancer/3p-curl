@@ -1,36 +1,87 @@
-name: Build
+name: Build curl package
 on:
   pull_request:
   push:
-    branches: [main]
-    tags: [v*]
+    branches: ['**']
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  AUTOBUILD_BUILD_ID: ${{ github.run_id }}
+  AUTOBUILD_VSVER: "180"
+  AUTOBUILD_VARIABLES_FILE: ${{ github.workspace }}/.build-variables/variables
 jobs:
-  build:
+  package:
     strategy:
+      fail-fast: false
       matrix:
-        os: [windows-2022, macos-15, ubuntu-22.04]
-        addrsize: ["64"]
-    continue-on-error: false
+        include:
+          - os: windows-2025
+            platform: windows64
+          - os: ubuntu-26.04
+            platform: linux64
     runs-on: ${{ matrix.os }}
     steps:
-      - name: Setup Homebrew Packages
-        if: ${{ runner.os == 'macOS' }}
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: FirestormViewer/fs-build-variables
+          path: .build-variables
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install packaging tools
+        run: python -m pip install autobuild==3.10.2 llsd zstandard
+      # On Linux the build uses Ninja.
+      - name: Install Ninja
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get -y install ninja-build
+      - name: Install dependencies (openssl, nghttp2, zlib-ng)
+        run: autobuild install -A 64
+      - name: Build and smoke test
         shell: bash
-        run: brew install ninja
-      - name: Setup Apt Packages
-        if: ${{ runner.os == 'Linux' }}
+        run: autobuild build -A 64
+      - name: Package
+        run: autobuild package -A 64 --archive-format tzst
+      - name: Verify package contents
         shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get -y install ninja-build
-      - uses: secondlife/action-autobuild@v5
+          archive=$(ls *.tar.zst)
+          python -c "import io, sys, tarfile, zstandard; names = tarfile.open(fileobj=io.BytesIO(zstandard.ZstdDecompressor().decompressobj().decompress(open(sys.argv[1], 'rb').read()))).getnames(); missing = [n for n in sys.argv[2:] if n not in names]; sys.exit('missing: %s' % missing if missing else 0)" \
+            "$archive" LICENSES/curl.txt autobuild-package.xml include/curl/curl.h \
+            $([ "${{ matrix.platform }}" = windows64 ] && echo lib/release/libcurl.lib || echo lib/release/libcurl.a)
+          sha256sum "$archive" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
         with:
-          addrsize: ${{ matrix.addrsize }}
+          name: curl-${{ matrix.platform }}
+          path: '*.tar.zst'
+          if-no-files-found: error
+
+  # Publishes the packages when the owner pushes a tag v<VERSION.txt>.
   release:
-    needs: build
-    runs-on: [ubuntu-latest]
+    needs: package
     if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: secondlife/action-autobuild-release@v3
+      - uses: actions/checkout@v4
+      - name: Check tag matches VERSION.txt
+        run: |
+          expected="v$(tr -d '\r\n' < VERSION.txt)"
+          [ "${GITHUB_REF_NAME}" = "$expected" ] || { echo "tag ${GITHUB_REF_NAME} != $expected"; exit 1; }
+      - uses: actions/download-artifact@v4
         with:
-          public: true
+          path: dist
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          sha256sum *.tar.zst | tee SHA256SUMS.txt
+          gh release create "${GITHUB_REF_NAME}" *.tar.zst SHA256SUMS.txt \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "curl ${GITHUB_REF_NAME#v}" \
+            --notes "Linden Lab's libcurl 7.54.1 source and build script, unchanged, rebuilt against the Vulkanstorm OpenSSL 3.5.9.1 package (anne-skydancer/3p-openssl v3.5.9.1) for the viewer's OpenSSL 3 step. Commit ${GITHUB_SHA}."
