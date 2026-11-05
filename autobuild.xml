@@ -222,7 +222,7 @@ Copyright (c) 2012, 2014, 2015, 2016 nghttp2 contributors</string>
           <array>
             <string>LICENSES/curl.txt</string>
             <string>include/curl/*.h</string>
-            <string>docs/curl/README.Linden</string>
+            <string>docs/curl/README.Vulkanstorm.md</string>
           </array>
           <key>build_directory</key>
           <string>stage</string>
@@ -311,7 +311,7 @@ Copyright (c) 2012, 2014, 2015, 2016 nghttp2 contributors</string>
       <key>license_file</key>
       <string>LICENSES/curl.txt</string>
       <key>copyright</key>
-      <string>Copyright (c) 1996 - 2014, Daniel Stenberg, (daniel@haxx.se).</string>
+      <string>Copyright (c) 1996 - 2026, Daniel Stenberg, &lt;daniel@haxx.se&gt;, and many contributors</string>
       <key>version_file</key>
       <string>VERSION.txt</string>
       <key>name</key>
@@ -319,11 +319,7 @@ Copyright (c) 2012, 2014, 2015, 2016 nghttp2 contributors</string>
       <key>canonical_repo</key>
       <string>https://github.com/anne-skydancer/3p-curl</string>
       <key>description</key>
-      <string>libcurl 7.54.1 (secondlife/3p-curl source, unchanged) rebuilt against OpenSSL 3.5 (Vulkanstorm build)</string>
-      <key>source_directory</key>
-      <string>curl</string>
-      <key>source_type</key>
-      <string>hg</string>
+      <string>libcurl 8.23.0, static, HTTP and HTTPS only, OpenSSL 3.5 + nghttp2 + zlib-ng (Vulkanstorm build)</string>
     </map>
   </map>
 </llsd>

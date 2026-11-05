@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
+# Builds curl 8 (libcurl, static) as an autobuild package for Vulkanstorm,
+# against the Vulkanstorm OpenSSL 3.5 package, nghttp2 and zlib-ng.
+#
+# Changes against secondlife/3p-curl (7.54.1):
+#   - source: the signed curl release tarball, SHA-256 pinned below, instead
+#     of the vendored 7.54.1 tree (see README.md for the signature check);
+#   - HTTP and HTTPS only: every other protocol is compiled out; no libidn2,
+#     libpsl, brotli, zstd, libssh2/libssh, LDAP, GSSAPI, NTLM or HTTP/3;
+#   - OpenSSL, zlib-ng and nghttp2 are given to CMake's own find modules
+#     explicitly, so nothing from the build machine can be picked up;
+#   - a smoke test checks the version line, the protocol list and the
+#     feature list of the built curl tool.
 
 cd "$(dirname "$0")"
 
@@ -28,9 +40,13 @@ else
     }
 fi
 
+CURL_VERSION="8.23.0"
+CURL_SHA256="e3de77cfa6367083c776a26647fc9f633b538c06c3baa73d931a252ac8f72b49"
+CURL_URL="https://curl.se/download/curl-${CURL_VERSION}.tar.gz"
+
 top="$(pwd)"
 stage="$top/stage"
-CURL_SOURCE_DIR="$top/curl"
+CURL_SOURCE_DIR="$top/curl-${CURL_VERSION}"
 CURL_BUILD_DIR="$top/build"
 
 # load autobuild provided shell functions and variables
@@ -41,37 +57,46 @@ source_environment_tempfile="$stage/source_environment.sh"
 # remove_cxxstd
 source "$(dirname "$AUTOBUILD_VARIABLES_FILE")/functions"
 
-# Use msbuild.exe instead of devenv.com
-build_sln() {
-    local solution=$1
-    local config=$2
-    local proj="${3:-}"
-    local toolset="${AUTOBUILD_WIN_VSTOOLSET:-v143}"
-
-    # e.g. config = "Release|$AUTOBUILD_WIN_VSPLATFORM" per devenv.com convention
-    local -a confparts
-    IFS="|" read -ra confparts <<< "$config"
-
-    msbuild.exe \
-        "$(cygpath -w "$solution")" \
-        ${proj:+-t:"$proj"} \
-        -p:Configuration="${confparts[0]}" \
-        -p:Platform="${confparts[1]}" \
-        -p:PlatformToolset=$toolset
-}
-
 ZLIB_INCLUDE="${stage}"/packages/include/zlib-ng
 OPENSSL_INCLUDE="${stage}"/packages/include/openssl
 
 [ -f "$ZLIB_INCLUDE"/zlib.h ] || fail "You haven't installed the zlib package yet."
 [ -f "$OPENSSL_INCLUDE"/ssl.h ] || fail "You haven't installed the openssl package yet."
 
-LIBCURL_HEADER_DIR="${CURL_SOURCE_DIR}"/include
-LIBCURL_VERSION_HEADER_DIR="$LIBCURL_HEADER_DIR/curl"
+sha256_of ()
+{
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    else
+        shasum -a 256 "$1" | cut -d' ' -f1
+    fi
+}
+
+# Fetch (or reuse) the release tarball and check it against the pinned digest.
+# CURL_TARBALL may name an already downloaded copy; it is checked the same way.
+mkdir -p "$top/dl"
+tarball="$top/dl/curl-${CURL_VERSION}.tar.gz"
+if [ -n "${CURL_TARBALL:-}" ]; then
+    cp -f "$CURL_TARBALL" "$tarball"
+elif [ ! -f "$tarball" ]; then
+    curl -sSfL --retry 3 -o "$tarball" "$CURL_URL"
+fi
+actual_sha256="$(sha256_of "$tarball")"
+if [ "$actual_sha256" != "$CURL_SHA256" ]; then
+    echo "SHA-256 mismatch for $tarball: $actual_sha256" 1>&2
+    exit 1
+fi
+rm -rf "$CURL_SOURCE_DIR" "$CURL_BUILD_DIR"
+tar -xzf "$tarball" -C "$top"
+# Clear what an earlier build staged (stage/packages holds the dependencies);
+# stale headers would otherwise go into the package through include/curl/*.h.
+rm -rf "$stage/include/curl" "$stage/lib" "$stage/bin" "$stage/LICENSES" "$stage/docs" "$stage/share"
+
 version="$(sed -nE 's/#define LIBCURL_VERSION "([^"]+)".*$/\1/p' \
-           "$(cygpath -m "${LIBCURL_VERSION_HEADER_DIR}/curlver.h")")"
-build=${AUTOBUILD_BUILD_ID:=0}
-echo "${version}-${build}" > "${stage}/VERSION.txt"
+           "$(cygpath -m "${CURL_SOURCE_DIR}/include/curl/curlver.h")")"
+[ "$version" = "$CURL_VERSION" ] || fail "curlver.h says $version, expected $CURL_VERSION"
+# autobuild reads version_file from the build directory
+cp -f "$top/VERSION.txt" "$stage/VERSION.txt"
 
 # Restore all .sos
 restore_sos ()
@@ -83,7 +108,6 @@ restore_sos ()
     done
 }
 
-
 # Restore all .dylibs
 restore_dylibs ()
 {
@@ -94,54 +118,82 @@ restore_dylibs ()
     done
 }
 
-# See if there's anything wrong with the checked out or
-# generated files.  Main test is to confirm that c-ares
-# is defeated and we're using a threaded resolver.
-check_damage ()
-{
-    case "$1" in
-        windows*)
-            #echo "Verifying Ares is disabled"
-            #grep 'USE_ARES\s*1' lib/curl_config.h | grep '^/\*'
-        ;;
+# Options shared by every platform. The viewer needs HTTP and HTTPS with
+# cookies (in memory), proxies (HTTP, SOCKS), MIME (Linux crash reports) and
+# HTTP/2 through nghttp2; nothing else.
+common_opts=(
+    -DBUILD_SHARED_LIBS:BOOL=OFF
+    -DBUILD_STATIC_LIBS:BOOL=ON
+    -DBUILD_CURL_EXE:BOOL=ON
+    -DBUILD_STATIC_CURL:BOOL=ON
+    -DBUILD_TESTING:BOOL=OFF
+    -DBUILD_EXAMPLES:BOOL=OFF
+    -DBUILD_LIBCURL_DOCS:BOOL=OFF
+    -DBUILD_MISC_DOCS:BOOL=OFF
+    -DENABLE_CURL_MANUAL:BOOL=OFF
+    -DCURL_LTO:BOOL=OFF
+    -DCURL_USE_PKGCONFIG:BOOL=OFF
+    -DCURL_USE_CMAKECONFIG:BOOL=OFF
+    -DCURL_USE_OPENSSL:BOOL=ON
+    -DOPENSSL_USE_STATIC_LIBS:BOOL=ON
+    -DUSE_NGHTTP2:BOOL=ON
+    -DCURL_ZLIB:BOOL=ON
+    -DENABLE_THREADED_RESOLVER:BOOL=ON
+    -DENABLE_ARES:BOOL=OFF
+    -DUSE_LIBIDN2:BOOL=OFF
+    -DCURL_USE_LIBPSL:BOOL=OFF
+    -DCURL_BROTLI:BOOL=OFF
+    -DCURL_ZSTD:BOOL=OFF
+    -DCURL_USE_LIBSSH2:BOOL=OFF
+    -DCURL_USE_LIBSSH:BOOL=OFF
+    -DCURL_USE_GSSAPI:BOOL=OFF
+    -DCURL_USE_GSASL:BOOL=OFF
+    -DUSE_NGTCP2:BOOL=OFF
+    -DUSE_QUICHE:BOOL=OFF
+    -DCURL_ENABLE_NTLM:BOOL=OFF
+    -DCURL_DISABLE_LDAP:BOOL=ON
+    -DCURL_DISABLE_LDAPS:BOOL=ON
+    -DCURL_DISABLE_DICT:BOOL=ON
+    -DCURL_DISABLE_FILE:BOOL=ON
+    -DCURL_DISABLE_FTP:BOOL=ON
+    -DCURL_DISABLE_GOPHER:BOOL=ON
+    -DCURL_DISABLE_IMAP:BOOL=ON
+    -DCURL_DISABLE_IPFS:BOOL=ON
+    -DCURL_DISABLE_MQTT:BOOL=ON
+    -DCURL_DISABLE_POP3:BOOL=ON
+    -DCURL_DISABLE_RTSP:BOOL=ON
+    -DCURL_DISABLE_SMTP:BOOL=ON
+    -DCURL_DISABLE_TELNET:BOOL=ON
+    -DCURL_DISABLE_TFTP:BOOL=ON
+    -DCURL_DISABLE_WEBSOCKETS:BOOL=ON
+)
 
-        darwin*|linux*)
-            echo "Verifying Ares is disabled"
-            egrep 'USE_THREADS_POSIX[[:space:]]+1' lib/curl_config.h
-        ;;
-    esac
-}
-
-# Read the version of a particular installable package from autobuild.xml.
-# Optional $2 specifies number of version-number parts to report.
-get_installable_version ()
+# The curl tool's first --version line, protocols and features must match
+# the configuration above.
+smoke_test ()
 {
-    set +x
-    # This command dumps the autobuild.xml data for the specified installable
-    # in Python literal syntax.
-    pydata="$("$autobuild" installables print "$1")"
-    # Now harvest the version key.
-    # It's important to use ''' syntax because of newlines in output. Specify
-    # raw literal syntax too in case of backslashes.
-    # Use ast.literal_eval(), safer than plain builtin eval.
-    # Once we have the Python dict, extract "version" key.
-    # Split version number on '.'.
-    # Keep up to $2 version-number parts.
-    # Rejoin them on '.' again and print.
-    # On Windows, use sys.stdout.buffer.write() to avoid appending '\r\n': the
-    # '\r' is NOT removed by bash, so it becomes part of the string contents,
-    # which confuses both scripted comparisons and human readers.
-    python -c "from ast import literal_eval
-import sys
-sys.stdout.buffer.write('.'.join(literal_eval(r'''$pydata''')['version'].split('.')[:${2:-}]).encode('utf-8'))"
-    set -x
-}
-
-# Given an (e.g. version) string possibly containing periods, escape those
-# periods with backslashes.
-escape_dots ()
-{
-    echo "${1//./\\.}"
+    local exe="$1"
+    local out
+    out="$("$exe" --version | tr -d '\r')"
+    echo "$out"
+    local first protocols features
+    first="$(echo "$out" | head -n 1)"
+    protocols="$(echo "$out" | sed -n 's/^Protocols: //p')"
+    features="$(echo "$out" | sed -n 's/^Features: //p')"
+    expr "$first" : "curl ${version//./\\.} " > /dev/null
+    expr "$first" : ".* libcurl/${version//./\\.} " > /dev/null
+    expr "$first" : ".* OpenSSL/3\.5\." > /dev/null
+    expr "$first" : ".* zlib/" > /dev/null
+    expr "$first" : ".* nghttp2/" > /dev/null
+    [ "$protocols" = "http https" ] || fail "unexpected protocols: $protocols"
+    for want in AsynchDNS HTTP2 HTTPS-proxy libz SSL threadsafe; do
+        echo " $features " | grep -q " $want " || fail "feature $want missing: $features"
+    done
+    for unwanted in IDN PSL brotli zstd NTLM Kerberos SPNEGO GSS-API HTTP3; do
+        if echo " $features " | grep -q " $unwanted "; then
+            fail "unwanted feature $unwanted: $features"
+        fi
+    done
 }
 
 mkdir -p "$CURL_BUILD_DIR"
@@ -149,81 +201,45 @@ mkdir -p "$CURL_BUILD_DIR"
 pushd "$CURL_BUILD_DIR"
     case "$AUTOBUILD_PLATFORM" in
         windows*)
-            opts="$(replace_switch /Zi /Z7 $LL_BUILD_RELEASE) -DNGHTTP2_STATICLIB=1"
+            opts="$(replace_switch /Zi /Z7 $LL_BUILD_RELEASE)"
             plainopts="$(remove_switch /GR $(remove_cxxstd $opts))"
 
             packages="$(cygpath -m "$stage/packages")"
             load_vsvars
 
+            # LL_BUILD_RELEASE defines UNICODE/_UNICODE; ENABLE_UNICODE makes
+            # curl's own Windows code agree with that. With MSVC, CMake's
+            # FindOpenSSL derives OPENSSL_*_LIBRARY from LIB_EAY_RELEASE and
+            # SSL_EAY_RELEASE, so those name the libraries.
             cmake "$(cygpath -m "${CURL_SOURCE_DIR}")" \
                 -G"$AUTOBUILD_WIN_CMAKE_GEN" -A"$AUTOBUILD_WIN_VSPLATFORM" \
-                -DCMAKE_C_FLAGS:STRING="$plainopts" \
+                -DCMAKE_C_FLAGS:STRING="$plainopts -DNGHTTP2_STATICLIB" \
                 -DCMAKE_CXX_FLAGS:STRING="$opts" \
-                -DENABLE_THREADED_RESOLVER:BOOL=ON \
-                -DCMAKE_USE_OPENSSL:BOOL=TRUE \
-                -DUSE_NGHTTP2:BOOL=TRUE \
-                -DNGHTTP2_INCLUDE_DIR:FILEPATH="$packages/include" \
+                -DCMAKE_MSVC_RUNTIME_LIBRARY:STRING=MultiThreadedDLL \
+                -DENABLE_UNICODE:BOOL=ON \
+                "${common_opts[@]}" \
+                -DOPENSSL_INCLUDE_DIR:PATH="$packages/include" \
+                -DLIB_EAY_RELEASE:FILEPATH="$packages/lib/release/libcrypto.lib" \
+                -DSSL_EAY_RELEASE:FILEPATH="$packages/lib/release/libssl.lib" \
+                -DZLIB_INCLUDE_DIR:PATH="$packages/include/zlib-ng" \
+                -DZLIB_LIBRARY:FILEPATH="$packages/lib/release/zlib.lib" \
+                -DNGHTTP2_INCLUDE_DIR:PATH="$packages/include" \
                 -DNGHTTP2_LIBRARY:FILEPATH="$packages/lib/release/nghttp2.lib" \
                 -DCMAKE_INSTALL_PREFIX="$(cygpath -m "$stage")"
 
-            check_damage "$AUTOBUILD_PLATFORM"
-
             cmake --build . --config Release -j$AUTOBUILD_CPU_COUNT
             cmake --install . --config Release
-
-            # conditionally run unit tests
-            if [ "${DISABLE_UNIT_TESTS:-0}" = "0" ]; then
-                pushd tests
-                # Nothin' to do yet
-                popd
-            fi
 
             # Stage archives
             mkdir -p "${stage}/lib/release"
             mv "${stage}/lib/libcurl.lib" "${stage}"/lib/release/
 
-            # Run 'curl' as a sanity check. Capture just the first line, which
-            # should have versions of stuff.
-            curlout="$("${stage}/bin/curl.exe" --version | head -n 1)"
-            # With -e in effect, any nonzero rc blows up the script --
-            # so plain 'expr str : pattern' asserts that str contains pattern.
-            # curl version - should be start of line
-            expr "$curlout" : "curl $(escape_dots "$version")" #> /dev/null
-            # libcurl/version
-            expr "$curlout" : ".* libcurl/$(escape_dots "$version")" > /dev/null
-            # OpenSSL/version
-            #expr "$curlout" : ".* OpenSSL/$(escape_dots "$(get_installable_version openssl 3)")" > /dev/null
-            # zlib/version
-            expr "$curlout" : ".* zlib/" > /dev/null
+            smoke_test "${stage}/bin/curl.exe"
         ;;
 
         darwin*)
             export MACOSX_DEPLOYMENT_TARGET="$LL_BUILD_DARWIN_DEPLOY_TARGET"
 
-            # Force libz and openssl static linkage by moving .dylibs out of the way
-            # trap restore_dylibs EXIT
-            # for dylib in "$stage"/packages/lib/release/lib{z,crypto,ssl}*.dylib; do
-            #     if [ -f "$dylib" ]; then
-            #         mv "$dylib" "$dylib".disable
-            #     fi
-            # done
-
-            # Release configure and build
-
-            # Make .dylib's usable during configure as well as unit tests
-            # (Used when building with dylib libz or OpenSSL.)
-            # mkdir -p Resources/
-            # ln -sf "${stage}"/packages/lib/release/*.dylib Resources/
-            # mkdir -p ../Resources/
-            # ln -sf "${stage}"/packages/lib/release/*.dylib ../Resources/
-            # mkdir -p tests/Resources/
-            # ln -sf "${stage}"/packages/lib/release/*.dylib tests/Resources/
-            # LDFLAGS="-L../Resources/ -L\"$stage\"/packages/lib/release" \
-
-            # -T buildsystem=1 is to work around an error in the upstream
-            # CMakeLists.txt that doesn't work with the Xcode "new build
-            # system." Possibly a newer version of curl will fix.
-            # https://stackoverflow.com/a/65474688
             for arch in x86_64 arm64 ; do
                 ARCH_ARGS="-arch $arch"
                 cxx_opts="${TARGET_OPTS:-$ARCH_ARGS $LL_BUILD_RELEASE}"
@@ -237,61 +253,31 @@ pushd "$CURL_BUILD_DIR"
                     CXXFLAGS="$cxx_opts" \
                     LDFLAGS="$ld_opts" \
                     cmake "${CURL_SOURCE_DIR}" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-                        -DCMAKE_C_FLAGS:STRING="$cc_opts" \
+                        -DCMAKE_C_FLAGS:STRING="$cc_opts -DNGHTTP2_STATICLIB" \
                         -DCMAKE_CXX_FLAGS:STRING="$cxx_opts" \
-                        -DBUILD_SHARED_LIBS:BOOL=OFF \
-                        -DENABLE_THREADED_RESOLVER:BOOL=ON \
-                        -DCMAKE_USE_OPENSSL:BOOL=TRUE \
-                        -DUSE_NGHTTP2:BOOL=TRUE \
-                        -DNGHTTP2_INCLUDE_DIR:FILEPATH="$stage/packages/include" \
+                        "${common_opts[@]}" \
+                        -DOPENSSL_INCLUDE_DIR:PATH="$stage/packages/include" \
+                        -DOPENSSL_CRYPTO_LIBRARY:FILEPATH="$stage/packages/lib/release/libcrypto.a" \
+                        -DOPENSSL_SSL_LIBRARY:FILEPATH="$stage/packages/lib/release/libssl.a" \
+                        -DZLIB_INCLUDE_DIR:PATH="$stage/packages/include/zlib-ng" \
+                        -DZLIB_LIBRARY:FILEPATH="$stage/packages/lib/release/libz.a" \
+                        -DNGHTTP2_INCLUDE_DIR:PATH="$stage/packages/include" \
                         -DNGHTTP2_LIBRARY:FILEPATH="$stage/packages/lib/release/libnghttp2.a" \
                         -DCMAKE_INSTALL_PREFIX="$stage" \
                         -DCMAKE_INSTALL_LIBDIR="$stage/lib/release/$arch" \
                         -DCMAKE_OSX_ARCHITECTURES="$arch" \
                         -DCMAKE_OSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET}
 
-                    check_damage "$AUTOBUILD_PLATFORM"
-
                     cmake --build . --config Release -j$AUTOBUILD_CPU_COUNT
                     cmake --install . --config Release
+                    if [ "$arch" = "$(uname -m)" ]; then
+                        smoke_test "${stage}/bin/curl"
+                    fi
                 popd
             done
 
             # create fat libraries
             lipo -create -output ${stage}/lib/release/libcurl.a ${stage}/lib/release/x86_64/libcurl.a ${stage}/lib/release/arm64/libcurl.a
-
-            # conditionally run unit tests
-            # Disabled here and below by default on Mac because they
-            # trigger the Mac firewall dialog and that may make
-            # automated builds unreliable.  During development,
-            # explicitly inhibit the disable and run the tests.  They
-            # matter.
-#            if [ "${DISABLE_UNIT_TESTS:-1}" = "0" ]; then
-#                pushd tests
-#                    # We hijack the 'quiet-test' target and redefine it as
-#                    # a no-valgrind test.  Also exclude test 906.  It fails in the
-#                    # 7.33 distribution with our configuration options.  530 fails
-#                    # in TeamCity.  (Expect problems with the unit tests, they're
-#                    # very sensitive to environment.)
-#                    make quiet-test TEST_Q='-n !906 !530 !564 !584 !706 !1316'
-#                popd
-#            fi
-
-            # Run 'curl' as a sanity check. Capture just the first line, which
-            # should have versions of stuff.
-            curlout="$("${stage}"/bin/curl --version | tr -d '\r' | head -n 1)"
-            # With -e in effect, any nonzero rc blows up the script --
-            # so plain 'expr str : pattern' asserts that str contains pattern.
-            # curl version - should be start of line
-            expr "$curlout" : "curl $(escape_dots "$version")" > /dev/null
-            # libcurl/version
-            expr "$curlout" : ".* libcurl/$(escape_dots "$version")" > /dev/null
-            # OpenSSL/version
-            #expr "$curlout" : ".* OpenSSL/$(escape_dots "$(get_installable_version openssl 3)")" > /dev/null
-            # zlib/version
-            expr "$curlout" : ".* zlib/" > /dev/null
-            # nghttp2/versionx
-            #expr "$curlout" : ".* nghttp2/$(escape_dots "$(get_installable_version nghttp2 3)")" > /dev/null
         ;;
 
         linux*)
@@ -310,7 +296,7 @@ pushd "$CURL_BUILD_DIR"
 
             # Force static linkage to libz and openssl by moving .sos out of the way
             trap restore_sos EXIT
-            for solib in "${stage}"/packages/lib/release/lib{z,ssl,crypto}.so*; do
+            for solib in "${stage}"/packages/lib/release/lib{z,ssl,crypto,nghttp2}.so*; do
                 if [ -f "$solib" ]; then
                     mv -f "$solib" "$solib".disable
                 fi
@@ -318,70 +304,24 @@ pushd "$CURL_BUILD_DIR"
 
             mkdir -p "$stage/lib/release"
 
-            # Autoconf's configure will do some odd things to flags.  '-I' options
-            # will get transferred to '-isystem' and there's a problem with quoting.
-            # Linking and running also require LD_LIBRARY_PATH to locate the OpenSSL
-            # .so's.  The '--with-ssl' option could do this if we had a more normal
-            # package layout.
-            #
-            # configure-time compilation looks like:
-            # ac_compile='$CC -c $CFLAGS $CPPFLAGS conftest.$ac_ext >&5'
-            # ac_link='$CC -o conftest$ac_exeext $CFLAGS $CPPFLAGS $LDFLAGS conftest.$ac_ext $LIBS >&5'
-            saved_path="${LD_LIBRARY_PATH:-}"
-
-            # Release configure and build
-            export LD_LIBRARY_PATH="${stage}"/packages/lib/release:"$saved_path"
-
             cmake "${CURL_SOURCE_DIR}" -G"Ninja" -DCMAKE_BUILD_TYPE=Release \
-                -DCMAKE_C_FLAGS:STRING="$plainopts" \
+                -DCMAKE_C_FLAGS:STRING="$plainopts -DNGHTTP2_STATICLIB" \
                 -DCMAKE_CXX_FLAGS:STRING="$opts" \
-                -DENABLE_THREADED_RESOLVER:BOOL=ON \
-                -DCMAKE_USE_OPENSSL:BOOL=TRUE \
-                -DUSE_NGHTTP2:BOOL=TRUE \
-                -DNGHTTP2_INCLUDE_DIR:FILEPATH="$stage/packages/include" \
+                "${common_opts[@]}" \
+                -DOPENSSL_INCLUDE_DIR:PATH="$stage/packages/include" \
+                -DOPENSSL_CRYPTO_LIBRARY:FILEPATH="$stage/packages/lib/release/libcrypto.a" \
+                -DOPENSSL_SSL_LIBRARY:FILEPATH="$stage/packages/lib/release/libssl.a" \
+                -DZLIB_INCLUDE_DIR:PATH="$stage/packages/include/zlib-ng" \
+                -DZLIB_LIBRARY:FILEPATH="$stage/packages/lib/release/libz.a" \
+                -DNGHTTP2_INCLUDE_DIR:PATH="$stage/packages/include" \
                 -DNGHTTP2_LIBRARY:FILEPATH="$stage/packages/lib/release/libnghttp2.a" \
-                -DBUILD_SHARED_LIBS:BOOL=FALSE \
-                -DCMAKE_INSTALL_PREFIX=$stage
-
-            check_damage "$AUTOBUILD_PLATFORM"
+                -DCMAKE_INSTALL_PREFIX="$stage" \
+                -DCMAKE_INSTALL_LIBDIR=lib/release
 
             cmake --build . --config Release -j$AUTOBUILD_CPU_COUNT
             cmake --install . --config Release
 
-            mkdir -p "$stage/lib/release"
-            mv "$stage/lib/libcurl.a" "$stage/lib/release/libcurl.a"
-
-#           # conditionally run unit tests
-#           if [ "${DISABLE_UNIT_TESTS:-0}" = "0" ]; then
-#                pushd tests
-#                    # We hijack the 'quiet-test' target and redefine it as
-#                    # a no-valgrind test.  Also exclude test 906.  It fails in the
-#                    # 7.33 distribution with our configuration options.  530 fails
-#                    # in TeamCity.  815 hangs in 7.36.0 fixed in 7.37.0.
-#                    #
-#                    # Expect problems with the unit tests, they're very sensitive
-#                    # to environment.
-#                    make quiet-test TEST_Q='-n !906 !530 !564 !584 !1026'
-#                popd
-#            fi
-
-            # Run 'curl' as a sanity check. Capture just the first line, which
-            # should have versions of stuff.
-            curlout="$("${stage}"/bin/curl --version | tr -d '\r' | head -n 1)"
-            # With -e in effect, any nonzero rc blows up the script --
-            # so plain 'expr str : pattern' asserts that str contains pattern.
-            # curl version - should be start of line
-            expr "$curlout" : "curl $(escape_dots "$version")" > /dev/null
-            # libcurl/version
-            expr "$curlout" : ".* libcurl/$(escape_dots "$version")" > /dev/null
-            # OpenSSL/version
-            #expr "$curlout" : ".* OpenSSL/$(escape_dots "$(get_installable_version openssl 3)")" > /dev/null
-            # zlib/version
-            expr "$curlout" : ".* zlib/" > /dev/null
-            # nghttp2/versionx
-            #expr "$curlout" : ".* nghttp2/$(escape_dots "$(get_installable_version nghttp2 3)")" > /dev/null
-
-            export LD_LIBRARY_PATH="$saved_path"
+            smoke_test "${stage}/bin/curl"
         ;;
     esac
     mkdir -p "$stage/LICENSES"
@@ -390,4 +330,4 @@ popd
 rm -rf "$CURL_BUILD_DIR"
 
 mkdir -p "$stage"/docs/curl/
-cp -a "$top"/README.Linden "$stage"/docs/curl/
+cp -a "$top"/README.md "$stage"/docs/curl/README.Vulkanstorm.md
