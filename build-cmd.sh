@@ -298,6 +298,9 @@ pushd "$CURL_BUILD_DIR"
             # Default target per --address-size
             opts="${TARGET_OPTS:--m$AUTOBUILD_ADDRSIZE $LL_BUILD_RELEASE}"
             plainopts="$(remove_cxxstd $opts)"
+            # curl 7.54.1 predates C23, the default of GCC 15 (ubuntu-26.04):
+            # its configure checks and test servers need the older dialect.
+            plainopts="$plainopts -std=gnu11"
 
             # Handle any deliberate platform targeting
             if [ -z "${TARGET_CPPFLAGS:-}" ]; then
