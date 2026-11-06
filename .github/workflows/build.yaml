@@ -11,6 +11,11 @@ env:
   AUTOBUILD_BUILD_ID: ${{ github.run_id }}
   AUTOBUILD_VSVER: "180"
   AUTOBUILD_VARIABLES_FILE: ${{ github.workspace }}/.build-variables/variables
+  # autobuild writes vcs_branch / vcs_revision / vcs_url into autobuild-package.xml
+  AUTOBUILD_VCS_INFO: "1"
+  AUTOBUILD_VCS_BRANCH: ${{ github.ref_name }}
+  AUTOBUILD_VCS_REVISION: ${{ github.sha }}
+  AUTOBUILD_VCS_URL: https://github.com/${{ github.repository }}.git
 jobs:
   package:
     strategy:
@@ -36,6 +41,13 @@ jobs:
       - name: Build and smoke test
         shell: bash
         run: autobuild build -A 64
+      - name: Write the build-info file
+        shell: bash
+        run: |
+          python -I scripts/buildinfo.py write --name curl --flavour windows64 --out stage/LICENSES/curl-buildinfo.json \
+            --upstream-version 8.23.0 --upstream-url https://curl.se/download/curl-8.23.0.tar.gz \
+            --upstream-sha256 e3de77cfa6367083c776a26647fc9f633b538c06c3baa73d931a252ac8f72b49 \
+            --options 'CMake Release, static libcurl (BUILD_SHARED_LIBS=OFF); HTTP and HTTPS only (all other protocols disabled), cookies in memory, HTTP/2 via nghttp2, threaded resolver (AsynchDNS), OpenSSL 3.5 static, zlib-ng; no IDN, PSL, brotli, zstd, NTLM, GSS, HTTP/3'
       - name: Package
         run: autobuild package -A 64 --archive-format tzst
       - name: Verify package contents
@@ -43,7 +55,7 @@ jobs:
         run: |
           archive=$(ls *.tar.zst)
           python -c "import io, sys, tarfile, zstandard; names = tarfile.open(fileobj=io.BytesIO(zstandard.ZstdDecompressor().decompressobj().decompress(open(sys.argv[1], 'rb').read()))).getnames(); missing = [n for n in sys.argv[2:] if n not in names]; sys.exit('missing: %s' % missing if missing else 0)" \
-            "$archive" LICENSES/curl.txt autobuild-package.xml include/curl/curl.h \
+            "$archive" LICENSES/curl.txt autobuild-package.xml LICENSES/curl-buildinfo.json include/curl/curl.h \
             $([ "${{ matrix.platform }}" = windows64 ] && echo lib/release/libcurl.lib || echo lib/release/libcurl.a)
           sha256sum "$archive" | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
@@ -79,18 +91,28 @@ jobs:
         with:
           repository: FirestormViewer/fs-build-variables
           path: .build-variables
+      - name: Trust the workspace (autobuild reads the git state in the container)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Install dependencies (openssl, nghttp2, zlib-ng)
         shell: bash
         run: autobuild install -A 64
       - name: Build and smoke test
         shell: bash
         run: autobuild build -A 64
+      - name: No glibc symbol newer than 2.39
+        shell: bash
+        run: python3 -I scripts/glibc-check.py --json glibc.json --max 2.39 --dep-dir stage/packages/lib/release stage/lib/release/libcurl.a
+      - name: Write the build-info file
+        shell: bash
+        run: |
+          python -I scripts/buildinfo.py write --name curl --flavour linux64-lts --out stage/LICENSES/curl-buildinfo.json \
+            --upstream-version 8.23.0 --upstream-url https://curl.se/download/curl-8.23.0.tar.gz \
+            --upstream-sha256 e3de77cfa6367083c776a26647fc9f633b538c06c3baa73d931a252ac8f72b49 \
+            --options 'CMake Release, static libcurl (BUILD_SHARED_LIBS=OFF); HTTP and HTTPS only (all other protocols disabled), cookies in memory, HTTP/2 via nghttp2, threaded resolver (AsynchDNS), OpenSSL 3.5 static, zlib-ng; no IDN, PSL, brotli, zstd, NTLM, GSS, HTTP/3' \
+            --container ubuntu:24.04 --glibc-json glibc.json
       - name: Package
         shell: bash
         run: autobuild package -A 64 --archive-format tzst
-      - name: No glibc symbol newer than 2.39
-        shell: bash
-        run: python3 -I scripts/glibc-check.py --max 2.39 --dep-dir stage/packages/lib/release stage/lib/release/libcurl.a
       - name: Name the archive linux64-lts
         shell: bash
         run: |
@@ -101,7 +123,7 @@ jobs:
         run: |
           archive=$(ls *.tar.zst)
           python -c "import io, sys, tarfile, zstandard; names = tarfile.open(fileobj=io.BytesIO(zstandard.ZstdDecompressor().decompressobj().decompress(open(sys.argv[1], 'rb').read()))).getnames(); missing = [n for n in sys.argv[2:] if n not in names]; sys.exit('missing: %s' % missing if missing else 0)" \
-            "$archive" LICENSES/curl.txt autobuild-package.xml include/curl/curl.h \
+            "$archive" LICENSES/curl.txt autobuild-package.xml LICENSES/curl-buildinfo.json include/curl/curl.h \
             lib/release/libcurl.a
           sha256sum "$archive" | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
@@ -112,7 +134,7 @@ jobs:
 
 
   package-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -130,22 +152,30 @@ jobs:
           ldd --version 2>&1 | sed -n 1p
           gcc --version | sed -n 1p
       - name: Use the matching (non-LTS) openssl package
-        run: autobuild installables edit openssl platform=linux64 url=https://github.com/anne-skydancer/3p-openssl/releases/download/v3.5.9.2/openssl-3.5.9.2-linux64-42282004860.tar.zst hash=3f24145d422fe2eceacb8e40b4e0f037c87b891f hash_algorithm=sha1
+        run: autobuild installables edit openssl platform=linux64 url=https://github.com/anne-skydancer/3p-openssl/releases/download/v3.5.9.3/openssl-3.5.9.3-linux64-42296958291.tar.zst hash=a1e72a8df4e2a79a2b5713752106cac02d347670 hash_algorithm=sha1
       - name: Install dependencies (openssl, nghttp2, zlib-ng)
         run: autobuild install -A 64
       - name: Build and smoke test
         shell: bash
         run: autobuild build -A 64
-      - name: Package
-        run: autobuild package -A 64 --archive-format tzst
       - name: Newest glibc the archive needs
         shell: bash
-        run: python3 -I scripts/glibc-check.py --dep-dir stage/packages/lib/release stage/lib/release/libcurl.a | tee -a "$GITHUB_STEP_SUMMARY"
+        run: python3 -I scripts/glibc-check.py --json glibc.json --dep-dir stage/packages/lib/release stage/lib/release/libcurl.a | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Write the build-info file
+        shell: bash
+        run: |
+          python -I scripts/buildinfo.py write --name curl --flavour linux64 --out stage/LICENSES/curl-buildinfo.json \
+            --upstream-version 8.23.0 --upstream-url https://curl.se/download/curl-8.23.0.tar.gz \
+            --upstream-sha256 e3de77cfa6367083c776a26647fc9f633b538c06c3baa73d931a252ac8f72b49 \
+            --options 'CMake Release, static libcurl (BUILD_SHARED_LIBS=OFF); HTTP and HTTPS only (all other protocols disabled), cookies in memory, HTTP/2 via nghttp2, threaded resolver (AsynchDNS), OpenSSL 3.5 static, zlib-ng; no IDN, PSL, brotli, zstd, NTLM, GSS, HTTP/3' \
+            --glibc-json glibc.json
+      - name: Package
+        run: autobuild package -A 64 --archive-format tzst
       - name: Verify package contents
         shell: bash
         run: |
           archive=$(ls *.tar.zst)
-          python -c "import io, sys, tarfile, zstandard; names = tarfile.open(fileobj=io.BytesIO(zstandard.ZstdDecompressor().decompressobj().decompress(open(sys.argv[1], 'rb').read()))).getnames(); missing = [n for n in sys.argv[2:] if n not in names]; sys.exit('missing: %s' % missing if missing else 0)"             "$archive" LICENSES/curl.txt autobuild-package.xml include/curl/curl.h lib/release/libcurl.a
+          python -c "import io, sys, tarfile, zstandard; names = tarfile.open(fileobj=io.BytesIO(zstandard.ZstdDecompressor().decompressobj().decompress(open(sys.argv[1], 'rb').read()))).getnames(); missing = [n for n in sys.argv[2:] if n not in names]; sys.exit('missing: %s' % missing if missing else 0)"             "$archive" LICENSES/curl.txt autobuild-package.xml LICENSES/curl-buildinfo.json include/curl/curl.h lib/release/libcurl.a
           sha256sum "$archive" | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
@@ -171,13 +201,20 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install zstandard
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
+          INTRO: 'libcurl 8.23.0, static, HTTP and HTTPS only, OpenSSL 3.5 + nghttp2 + zlib-ng. Source: curl-8.23.0.tar.gz, SHA-256 e3de77cfa6367083c776a26647fc9f633b538c06c3baa73d931a252ac8f72b49. Commit ${{ github.sha }}.'
         run: |
           cd dist
           sha256sum *.tar.zst | tee SHA256SUMS.txt
+          python -I ../scripts/buildinfo.py notes . --intro "$INTRO" > ../NOTES.md
+          cat ../NOTES.md >> "$GITHUB_STEP_SUMMARY"
           gh release create "${GITHUB_REF_NAME}" *.tar.zst SHA256SUMS.txt \
             --repo "${GITHUB_REPOSITORY}" \
             --title "curl ${GITHUB_REF_NAME#v}" \
-            --notes "libcurl 8.23.0, static, HTTP and HTTPS only, OpenSSL 3.5 + nghttp2 + zlib-ng. Source: curl-8.23.0.tar.gz, SHA-256 e3de77cfa6367083c776a26647fc9f633b538c06c3baa73d931a252ac8f72b49. Commit ${GITHUB_SHA}."
+            --notes-file ../NOTES.md
