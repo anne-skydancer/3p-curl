@@ -71,7 +71,7 @@ jobs:
         shell: bash
         run: |
           apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get -y install build-essential cmake ninja-build git python3 python3-venv python3-pip ca-certificates zstd perl pkg-config
+          DEBIAN_FRONTEND=noninteractive apt-get -y install build-essential cmake ninja-build git python3 python3-venv python3-pip ca-certificates curl zstd perl pkg-config
           python3 -m venv /opt/ab
           /opt/ab/bin/pip install autobuild==3.10.2 llsd zstandard
           echo /opt/ab/bin >> "$GITHUB_PATH"
