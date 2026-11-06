@@ -19,8 +19,6 @@ jobs:
         include:
           - os: windows-2025
             platform: windows64
-          - os: ubuntu-26.04
-            platform: linux64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -33,10 +31,6 @@ jobs:
           python-version: '3.13'
       - name: Install packaging tools
         run: python -m pip install autobuild==3.10.2 llsd zstandard
-      # On Linux the build uses Ninja.
-      - name: Install Ninja
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get -y install ninja-build
       - name: Install dependencies (openssl, nghttp2, zlib-ng)
         run: autobuild install -A 64
       - name: Build and smoke test
@@ -58,9 +52,69 @@ jobs:
           path: '*.tar.zst'
           if-no-files-found: error
 
+
+  # Linux is built in ubuntu:24.04 (glibc 2.39), the oldest glibc any viewer
+  # line builds with (vkstorm-release's container), so that the static
+  # library references no newer glibc symbol: built on ubuntu-26.04 (glibc
+  # 2.42) curl 8.23 used __memset_explicit_chk, which 2.39 does not have.
+  package-linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux64
+    runs-on: ${{ matrix.os }}
+    container: ubuntu:24.04
+    steps:
+      - name: Install build tools
+        shell: bash
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get -y install build-essential cmake ninja-build git             python3 python3-venv python3-pip ca-certificates zstd perl pkg-config
+          python3 -m venv /opt/ab
+          /opt/ab/bin/pip install autobuild==3.10.2 llsd zstandard
+          echo /opt/ab/bin >> "$GITHUB_PATH"
+          ldd --version | head -1
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: FirestormViewer/fs-build-variables
+          path: .build-variables
+      - name: Install dependencies (openssl, nghttp2, zlib-ng)
+        shell: bash
+        run: autobuild install -A 64
+      - name: Build and smoke test
+        shell: bash
+        run: autobuild build -A 64
+      - name: Package
+        shell: bash
+        run: autobuild package -A 64 --archive-format tzst
+      - name: No glibc symbol newer than 2.39
+        shell: bash
+        run: |
+          # __memset_explicit_chk and friends appeared after glibc 2.39
+          if nm -u stage/lib/release/libcurl.a | grep -E '__memset_explicit|__explicit_bzero_chk'; then
+            echo "libcurl.a references a glibc symbol newer than 2.39" >&2; exit 1
+          fi
+      - name: Verify package contents
+        shell: bash
+        run: |
+          archive=$(ls *.tar.zst)
+          python -c "import io, sys, tarfile, zstandard; names = tarfile.open(fileobj=io.BytesIO(zstandard.ZstdDecompressor().decompressobj().decompress(open(sys.argv[1], 'rb').read()))).getnames(); missing = [n for n in sys.argv[2:] if n not in names]; sys.exit('missing: %s' % missing if missing else 0)" \
+            "$archive" LICENSES/curl.txt autobuild-package.xml include/curl/curl.h \
+            $([ "linux64" = windows64 ] && echo lib/release/libcurl.lib || echo lib/release/libcurl.a)
+          sha256sum "$archive" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: curl-${{ matrix.platform }}
+          path: '*.tar.zst'
+          if-no-files-found: error
+
+
   # Publishes the packages when the owner pushes a tag v<VERSION.txt>.
   release:
-    needs: package
+    needs: [package, package-linux]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
