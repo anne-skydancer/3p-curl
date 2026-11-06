@@ -93,11 +93,11 @@ Copyright (c) 2012, 2014, 2015, 2016 nghttp2 contributors</string>
             <key>archive</key>
             <map>
               <key>hash</key>
-              <string>d83a1e910762b792c90550ce2b8f51f9aaec7570</string>
+              <string>183d0d51ccea8a18b1b50fc180fc5961fe747e3f</string>
               <key>hash_algorithm</key>
               <string>sha1</string>
               <key>url</key>
-              <string>https://github.com/secondlife/3p-openssl/releases/download/v1.1.1w-r4/openssl-1.1.1w-r4-linux64-20981673556.tar.zst</string>
+              <string>https://github.com/anne-skydancer/3p-openssl/releases/download/v3.5.9.1/openssl-3.5.9.1-linux64-42117119543.tar.zst</string>
             </map>
             <key>name</key>
             <string>linux64</string>
@@ -107,11 +107,11 @@ Copyright (c) 2012, 2014, 2015, 2016 nghttp2 contributors</string>
             <key>archive</key>
             <map>
               <key>hash</key>
-              <string>96e36bea4f5b126d064e95e0dfdab4a912088150</string>
+              <string>4971c6c1faf08cf172fe6ce7cd2854c23a1ef085</string>
               <key>hash_algorithm</key>
               <string>sha1</string>
               <key>url</key>
-              <string>file:///C:/Users/annes/source/repos/work/3p-openssl/openssl-3.5.9.1-windows64-1.tar.zst</string>
+              <string>https://github.com/anne-skydancer/3p-openssl/releases/download/v3.5.9.1/openssl-3.5.9.1-windows64-42117119543.tar.zst</string>
             </map>
             <key>name</key>
             <string>windows64</string>
