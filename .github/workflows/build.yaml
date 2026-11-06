@@ -93,8 +93,9 @@ jobs:
       - name: No glibc symbol newer than 2.39
         shell: bash
         run: |
-          # __memset_explicit_chk and friends appeared after glibc 2.39
-          if nm -u stage/lib/release/libcurl.a | grep -E '__memset_explicit|__explicit_bzero_chk'; then
+          # memset_explicit and __memset_explicit_chk are GLIBC_2.42
+          # (__explicit_bzero_chk is GLIBC_2.25 and fine)
+          if nm -u stage/lib/release/libcurl.a | grep -E 'memset_explicit'; then
             echo "libcurl.a references a glibc symbol newer than 2.39" >&2; exit 1
           fi
       - name: Verify package contents
